@@ -279,7 +279,6 @@ def sitemap():
     return send_from_directory('static', 'sitemap.xml')
 
 @app.route('/logout')
-' )
 @login_required
 def logout():
     app.logger.info(f"User {current_user.username} logged out")
