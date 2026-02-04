@@ -1,10 +1,10 @@
 import os
 import re
+import requests  # need this to download gallery images temporarily for PDFs
 from werkzeug.utils import secure_filename
 from flask import Flask, render_template, request, redirect, url_for, flash, send_from_directory, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_admin import Admin
-from flask import send_from_directory
 from flask_admin.contrib.sqla import ModelView
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -19,19 +19,15 @@ from sqlalchemy.sql import func
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from PIL import Image as PILImage
+from supabase import create_client, Client  # supabase storage
 import time
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 
-# =======================
-# App & Config
-# =======================
 app = Flask(__name__)
 
-# -----------------------
-# Environment Variables with Validation
-# -----------------------
+# make sure all required env vars are there
 def validate_env_vars():
     required_vars = [
         'SECRET_KEY',
@@ -40,7 +36,9 @@ def validate_env_vars():
         'MAIL_PORT',
         'MAIL_USERNAME',
         'MAIL_PASSWORD',
-        'MAIL_DEFAULT_SENDER'
+        'MAIL_DEFAULT_SENDER',
+        'SUPABASE_URL',
+        'SUPABASE_SERVICE_ROLE_KEY'
     ]
     for var in required_vars:
         if not os.getenv(var):
@@ -53,11 +51,9 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URI')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = 'static/images'
 os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], 'user_uploads'), exist_ok=True)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
-# -----------------------
-# Email Configuration
-# -----------------------
+# email config
 app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER')
 app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT'))
 app.config['MAIL_USE_TLS'] = os.getenv('MAIL_USE_TLS', 'False').lower() == 'true'
@@ -66,58 +62,48 @@ app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
 app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
 app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER')
 
-# -----------------------
-# Session Security
-# -----------------------
+# session stuff
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SECURE=True,  # Requires HTTPS in production
+    SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_SAMESITE='Lax',
     REMEMBER_COOKIE_HTTPONLY=True,
-    REMEMBER_COOKIE_DURATION=3600,  # 1 hour
+    REMEMBER_COOKIE_DURATION=3600,
     PERMANENT_SESSION_LIFETIME=3600
 )
 
-# =======================
-# Logging
-# =======================
+# supabase setup - this stops images disappearing on deploy
+supabase_url = os.getenv('SUPABASE_URL')
+supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+supabase_client: Client = create_client(supabase_url, supabase_key)
+BUCKET_NAME = "gallery"  # create this bucket in supabase, make it public
+SUPABASE_STORAGE_BASE = f"{supabase_url}/storage/v1/object/public/{BUCKET_NAME}/"
+
+# logging
 os.makedirs('logs', exist_ok=True)
 handler = RotatingFileHandler('logs/adora.log', maxBytes=1_000_000, backupCount=5)
 handler.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
+handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 app.logger.addHandler(handler)
 app.logger.setLevel(logging.INFO)
 
-# =======================
-# Extensions
-# =======================
+# extensions
 mail = Mail(app)
-from sqlalchemy import create_engine
-
-# Use pool_pre_ping to avoid stale connections
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    'pool_pre_ping': True
-}
-
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {'pool_pre_ping': True}
 db = SQLAlchemy(app)
-
 csrf = CSRFProtect(app)
 admin = Admin(app, name='Adora Admin', template_mode='bootstrap4')
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
-# Rate Limiting for Login
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
     default_limits=["200 per day", "50 per hour"]
 )
 
-# =======================
-# Password Validation
-# =======================
+# password strength check
 def is_strong_password(password):
     if len(password) < 12:
         return False, "Password must be at least 12 characters long."
@@ -131,18 +117,12 @@ def is_strong_password(password):
         return False, "Password must contain at least one special character."
     return True, "Password is valid."
 
-# =======================
-# Error Handling for CSRF
-# =======================
 @app.errorhandler(CSRFError)
 def handle_csrf_error(e):
     app.logger.error(f"CSRF error: {str(e)}")
     flash('CSRF token is missing or invalid. Please try again.', 'danger')
     return redirect(url_for('login'))
 
-# =======================
-# Initialize Database Function
-# =======================
 def init_db():
     with app.app_context():
         db.create_all()
@@ -154,14 +134,12 @@ def init_db():
             hashed_pw = generate_password_hash(default_password, method='pbkdf2:sha256:600000')
             db.session.add(User(username='admin', password=hashed_pw))
             app.logger.info("Created default admin user")
-
         global categories
         existing_categories = set(categories)
         for service in Service.query.all():
             category = service.name.lower().replace(' ', '_')
             if category not in existing_categories:
                 categories.append(category)
-                os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], category), exist_ok=True)
         if not Testimonial.query.first():
             testimonials_data = [
                 {'client_name': 'Sarah L.', 'content': 'Adora transformed our Uxbridge kitchen with precision.', 'location': 'Uxbridge', 'rating': 5, 'is_user_submitted': False},
@@ -181,17 +159,10 @@ def init_db():
         db.session.commit()
         app.logger.info("Database initialized successfully")
 
-# =======================
-# Categories
-# =======================
 categories = []
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-for cat in categories:
-    os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], cat), exist_ok=True)
 
-# =======================
-# Models
-# =======================
+# models
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(150), unique=True, nullable=False)
@@ -209,6 +180,14 @@ class Image(db.Model):
     category = db.Column(db.String(100), nullable=False)
     service_id = db.Column(db.Integer, db.ForeignKey('service.id'))
 
+    @property
+    def url(self):
+        return SUPABASE_STORAGE_BASE + self.category + '/' + self.filename
+
+    @property
+    def storage_path(self):
+        return f"{self.category}/{self.filename}"
+
 class Testimonial(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     client_name = db.Column(db.String(100), nullable=False)
@@ -222,14 +201,9 @@ class Tip(db.Model):
     title = db.Column(db.String(200), nullable=False)
     content = db.Column(db.Text, nullable=False)
 
-# =======================
-# Initialize Database
-# =======================
 init_db()
 
-# =======================
-# Admin Views
-# =======================
+# admin views
 class SecureModelView(ModelView):
     def is_accessible(self):
         return current_user.is_authenticated
@@ -251,26 +225,17 @@ admin.add_view(SecureModelView(Image, db.session))
 admin.add_view(TestimonialModelView(Testimonial, db.session))
 admin.add_view(SecureModelView(Tip, db.session))
 
-# =======================
-# Login Manager
-# =======================
 @login_manager.user_loader
 def load_user(user_id):
     user = User.query.get(int(user_id))
     app.logger.info(f"Loading user: {user_id}, found: {user}")
     return user
 
-# =======================
-# Allowed File Extensions
-# =======================
 ALLOWED_EXTENSIONS = {'.png', '.jpg', '.jpeg'}
-
 def is_allowed_file(filename):
     return os.path.splitext(filename)[1].lower() in ALLOWED_EXTENSIONS
 
-# =======================
-# Routes
-# =======================
+# routes
 @app.route('/reset_admin')
 def reset_admin():
     with app.app_context():
@@ -309,13 +274,12 @@ def login():
             return redirect(url_for('admin_dashboard'))
     return render_template('login.html', form=form)
 
-
-
 @app.route('/sitemap.xml')
 def sitemap():
     return send_from_directory('static', 'sitemap.xml')
 
 @app.route('/logout')
+' )
 @login_required
 def logout():
     app.logger.info(f"User {current_user.username} logged out")
@@ -330,29 +294,24 @@ def change_password():
         current_password = request.form.get('current_password')
         new_password = request.form.get('new_password')
         confirm_password = request.form.get('confirm_password')
-
         if not check_password_hash(current_user.password, current_password):
             app.logger.warning(f"Password change failed for {current_user.username}: Incorrect current password")
             flash('Current password is incorrect.', 'danger')
             return redirect(url_for('change_password'))
-
         if new_password != confirm_password:
             app.logger.warning(f"Password change failed for {current_user.username}: Passwords do not match")
             flash('New passwords do not match.', 'danger')
             return redirect(url_for('change_password'))
-
         is_valid, message = is_strong_password(new_password)
         if not is_valid:
             app.logger.warning(f"Password change failed for {current_user.username}: {message}")
             flash(message, 'danger')
             return redirect(url_for('change_password'))
-
         current_user.password = generate_password_hash(new_password, method='pbkdf2:sha256:600000')
         db.session.commit()
         app.logger.info(f"Password changed successfully for user: {current_user.username}")
         flash('Password changed successfully.', 'success')
         return redirect(url_for('admin_dashboard'))
-
     return render_template('change_password.html')
 
 @app.route('/admin')
@@ -378,7 +337,6 @@ def add_service():
             new_category = name.lower().replace(" ", "_")
             if new_category not in categories:
                 categories.append(new_category)
-                os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], new_category), exist_ok=True)
             flash('Service added successfully.', 'success')
             app.logger.info(f"Service added: {name} by user {current_user.username}")
             return redirect(url_for('admin_dashboard'))
@@ -435,16 +393,24 @@ def upload():
         for file in files:
             if file and file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
                 filename = secure_filename(file.filename)
-                file_path = os.path.join(app.config['UPLOAD_FOLDER'], category, filename)
-                file.save(file_path)
-                if os.path.exists(file_path):
+                storage_path = f"{category}/{filename}"
+                data = file.read()
+                try:
+                    supabase_client.storage.from_(BUCKET_NAME).upload(
+                        storage_path,
+                        data,
+                        file_options={
+                            "content-type": file.mimetype or "image/jpeg",
+                            "upsert": True
+                        }
+                    )
                     service = Service.query.filter(Service.name.ilike(category.replace('_', ' ').title())).first()
                     app.logger.info(f"Upload: Category={category}, Service={service.name if service else 'None'}, Filename={filename} by user {current_user.username}")
                     new_image = Image(filename=filename, category=category, service_id=service.id if service else None)
                     db.session.add(new_image)
-                else:
-                    flash(f'Failed to save file: {file.filename}', 'warning')
-                    app.logger.error(f"Failed to save file: {file_path}")
+                except Exception as e:
+                    flash(f'Failed to upload file: {file.filename} ({str(e)})', 'warning')
+                    app.logger.error(f"Supabase upload failed: {file.filename} - {str(e)}")
         db.session.commit()
         flash('Images uploaded successfully.', 'success')
         return redirect(url_for('admin_dashboard'))
@@ -557,10 +523,11 @@ def edit_image(id):
 @csrf.exempt
 def delete_image(id):
     image = Image.query.get_or_404(id)
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], image.category, image.filename)
-    if os.path.exists(file_path):
-        os.remove(file_path)
-        app.logger.info(f"Image file {file_path} deleted by user {current_user.username}")
+    try:
+        supabase_client.storage.from_(BUCKET_NAME).remove([image.storage_path])
+        app.logger.info(f"Image file {image.storage_path} deleted from Supabase by user {current_user.username}")
+    except Exception as e:
+        app.logger.error(f"Failed to delete from Supabase {image.storage_path}: {str(e)}")
     db.session.delete(image)
     db.session.commit()
     app.logger.info(f"Image {id} deleted from database by user {current_user.username}")
@@ -671,27 +638,22 @@ def contact(service_id):
     if not service:
         for cat in categories:
             all_gallery_data[cat] = Image.query.filter_by(category=cat).all()
-
     if request.method == 'POST':
         name = request.form.get('name', '').strip()
         email = request.form.get('email', '').strip()
         message_body = request.form.get('message', '').strip()
         selected_images = request.form.get('selected_gallery_images', '').split(',') if request.form.get('selected_gallery_images') else []
         uploaded_files = request.files.getlist('uploaded_images')
-
         app.logger.info(f"Form data received: name={name}, email={email}, message={message_body}")
         app.logger.info(f"Selected gallery images: {selected_images}")
         app.logger.info(f"Uploaded files: {[f.filename for f in uploaded_files if f and f.filename]}")
-
         if not name or not email or not message_body:
             app.logger.error("Missing required fields: name, email, or message")
             flash('Please fill in all required fields (name, email, message).', 'danger')
             return redirect(url_for('contact', service_id=service_id))
-
         upload_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'user_uploads')
         os.makedirs(upload_dir, exist_ok=True)
         app.logger.info(f"Upload directory ensured: {upload_dir}")
-
         saved_uploaded_files = []
         for file in uploaded_files:
             if file and file.filename:
@@ -716,7 +678,6 @@ def contact(service_id):
                     flash(f"Invalid file type for {file.filename}. Only PNG, JPG, JPEG allowed.", 'warning')
             else:
                 app.logger.warning("Received empty file in uploaded_files")
-
         saved_gallery_files = []
         for filename in selected_images:
             if not filename:
@@ -724,24 +685,28 @@ def contact(service_id):
                 continue
             image = Image.query.filter_by(filename=filename).first()
             if image:
-                filepath = os.path.join(app.config['UPLOAD_FOLDER'], image.category, filename)
-                if os.path.exists(filepath):
-                    saved_gallery_files.append((filepath, filename))
-                    app.logger.info(f"Found gallery image: {filepath} (size: {os.path.getsize(filepath)} bytes)")
-                else:
-                    app.logger.error(f"Gallery image not found on disk: {filepath}")
-                    flash(f"Selected gallery image {filename} not found on disk.", 'warning')
+                image_url = image.url
+                temp_filename = secure_filename(f"temp_{int(time.time())}_{filename}")
+                temp_path = os.path.join(upload_dir, temp_filename)
+                try:
+                    resp = requests.get(image_url, timeout=10)
+                    resp.raise_for_status()
+                    with open(temp_path, 'wb') as f:
+                        f.write(resp.content)
+                    if os.path.getsize(temp_path) > 0:
+                        saved_gallery_files.append((temp_path, filename))
+                        app.logger.info(f"Downloaded gallery image for PDF: {filename}")
+                except Exception as e:
+                    app.logger.error(f"Failed to download gallery image {filename}: {str(e)}")
+                    flash(f"Failed to include selected gallery image {filename}", 'warning')
             else:
                 app.logger.error(f"Image {filename} not found in database")
                 flash(f"Selected gallery image {filename} not found in database.", 'warning')
-
         app.logger.info(f"Saved uploaded files: {saved_uploaded_files}")
         app.logger.info(f"Saved gallery files: {saved_gallery_files}")
-
         timestamp = int(time.time())
         uploaded_pdf_path = os.path.join(upload_dir, f'uploaded_images_{name}_{timestamp}.pdf')
         gallery_pdf_path = os.path.join(upload_dir, f'gallery_images_{name}_{timestamp}.pdf')
-
         def create_pdf(file_list, pdf_path, title):
             if not file_list:
                 app.logger.info(f"No files to create PDF: {title}")
@@ -780,10 +745,8 @@ def contact(service_id):
                 app.logger.error(f"Error creating PDF {title}: {str(e)}")
                 flash(f"Failed to create PDF {title}: {str(e)}", 'warning')
                 return None
-
         uploaded_pdf = create_pdf(saved_uploaded_files, uploaded_pdf_path, "User Uploaded Images")
         gallery_pdf = create_pdf(saved_gallery_files, gallery_pdf_path, "Selected Gallery Images")
-
         try:
             msg = Message(f'Contact Form Submission: {name}', recipients=['Adora.constructionLTD@gmail.com'])
             msg.body = f"""
@@ -801,7 +764,6 @@ Service ID: {service_id if service_id else 'None'}
             if gallery_pdf and os.path.exists(gallery_pdf):
                 pdf_attachments.append((gallery_pdf, f'gallery_images_{name}_{timestamp}.pdf'))
                 app.logger.info(f"Prepared to attach gallery PDF: {gallery_pdf}")
-
             for pdf_path, pdf_name in pdf_attachments:
                 try:
                     with app.open_resource(pdf_path, 'rb') as fp:
@@ -810,11 +772,9 @@ Service ID: {service_id if service_id else 'None'}
                 except Exception as e:
                     app.logger.error(f"Failed to attach PDF {pdf_name}: {str(e)}")
                     flash(f"Failed to attach PDF {pdf_name}: {str(e)}", 'warning')
-
             mail.send(msg)
             app.logger.info("Business email sent successfully")
-
-            for filepath, _ in saved_uploaded_files:
+            for filepath, _ in saved_uploaded_files + saved_gallery_files:
                 try:
                     if os.path.exists(filepath):
                         os.remove(filepath)
@@ -828,12 +788,10 @@ Service ID: {service_id if service_id else 'None'}
                         app.logger.info(f"Deleted PDF: {pdf_path}")
                 except Exception as e:
                     app.logger.error(f"Failed to delete PDF {pdf_path}: {str(e)}")
-
         except Exception as e:
             app.logger.error(f"Failed to send business email: {str(e)}")
             flash(f'Failed to send message: {str(e)}', 'danger')
             return redirect(url_for('contact', service_id=service_id))
-
         try:
             thank_you_msg = Message(
                 subject="Thank you for contacting us!",
@@ -841,12 +799,9 @@ Service ID: {service_id if service_id else 'None'}
             )
             thank_you_msg.body = f"""
 Hi {name},
-
 Thank you for reaching out to us. We have received your message and will get back to you as soon as possible.
-
 Your message:
 {message_body}
-
 Best regards,
 Adora Team
 """
@@ -855,10 +810,8 @@ Adora Team
         except Exception as e:
             app.logger.error(f"Failed to send customer email: {str(e)}")
             flash(f"Failed to send confirmation email: {str(e)}", 'warning')
-
         flash('Message sent successfully. A confirmation email has been sent to you.', 'success')
         return redirect(url_for('contact', service_id=service_id))
-
     return render_template('contact.html', service=service, gallery_images=service.images if service else [], all_gallery_data=all_gallery_data)
 
 @app.route('/submit_review', methods=['POST'])
@@ -905,9 +858,6 @@ def serve_static(path):
 def about():
     return render_template('about.html')
 
-# =======================
-# Main
-# =======================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))  # Use Render's PORT env
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
