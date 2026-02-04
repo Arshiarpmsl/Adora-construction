@@ -4,7 +4,6 @@
 
 Flask app I threw together for the company – handles everything from showing off services and project photos to taking inquiries and letting me manage content from the backend.
 
-Site's fully up and running: https://adora-construction.co.uk
 
 ## What it's got
 
