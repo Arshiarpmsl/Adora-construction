@@ -400,7 +400,7 @@ def upload():
                         data,
                         file_options={
                             "content-type": file.mimetype or "image/jpeg",
-                            "upsert": True
+                            "upsert": "True"
                         }
                     )
                     service = Service.query.filter(Service.name.ilike(category.replace('_', ' ').title())).first()
