@@ -1,24 +1,30 @@
-Adora Home Renovation Website
- A Flask-based web application for managing home renovation services, including a gallery, contact form, and admin dashboard.
+# Adora Construction Website 🏗️
 
- ## Features
- - Service listings with image galleries
- - User authentication and admin dashboard
- - Contact form with email notifications and PDF attachments
- - Database-driven content management (SQLite/PostgreSQL)
+ live business site: https://adora-construction.co.uk
 
- ## Credits
- - Built with [Flask](https://flask.palletsprojects.com/), [Flask-SQLAlchemy](https://flask-sqlalchemy.palletsprojects.com/), [Flask-Admin](https://flask-admin.readthedocs.io/), [Flask-Login](https://flask-login.readthedocs.io/), and [Flask-Mail](https://pythonhosted.org/Flask-Mail/).
- - PDF generation powered by [ReportLab](https://www.reportlab.com/).
- - Image processing using [Pillow](https://pillow.readthedocs.io/).
- - Code optimization and deployment guidance assisted by [Grok](https://x.ai/grok), created by xAI.
- - [Add other credits, e.g., template designers, tutorials, or Stack Overflow posts used]
+Flask app I threw together for the company – handles everything from showing off services and project photos to taking inquiries and letting me manage content from the backend.
 
- ## Setup
- 1. Install dependencies: `pip install -r requirements.txt`
- 2. Set environment variables in `.env` (see `.env.example`)
- 3. Initialize database: `python -c "from app import init_db; init_db()"`
- 4. Run locally: `python app.py`
+Site's fully up and running: https://adora-construction.co.uk
 
- ## License
- MIT License - see the [LICENSE](LICENSE) file for details.
+## What it's got
+
+- **Home page** – quick overview of what we do, highlights popular services with small gallery previews, customer reviews, and a call-to-action contact button
+- **Services pages** – dedicated page for each service (kitchen renos, bathrooms, wardrobes, plumbing, etc.) with detailed descriptions and a scrolling gallery of example work
+- **Gallery section** – full project gallery with all photos, plus separate pages for each category so people can browse kitchens, bathrooms, whatever they're interested in 📸
+- **Contact form** – proper form where customers can write their message, pick reference images from our gallery, upload their own photos if they want, and it automatically bundles everything into neat PDFs then emails it straight to me
+- **Admin panel** – login area where I can add new services, upload fresh project images, approve/edit testimonials, add tips, all without touching code
+- **Customer reviews** – section showing real feedback, plus a form for new reviews to come in
+
+Had a massive headache for ages where all gallery images would vanish every time I pushed an update (Render wipes the filesystem). Finally sorted it by shifting everything over to Supabase Storage – created a public bucket called "gallery". Images are permanent now, no more re-uploading after every deploy.
+
+## Tech behind it
+
+- Flask running the whole thing
+- Supabase handling the database and all image storage now
+- SQLAlchemy for the models
+- Flask-Admin for the backend interface
+- Bootstrap 5 keeping it looking clean and working properly on phones
+- ReportLab + Pillow to generate those PDF attachments from the contact form
+- Hosted on Render with gunicorn
+
+Site's stable, loads quick, and does exactly what I need for the business. If something looks off or you've got suggestions, drop an issue.
