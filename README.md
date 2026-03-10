@@ -20,7 +20,6 @@ Had a massive headache for ages where all gallery images would vanish every time
 
 - Flask running the whole thing
 - Supabase handling the database and all image storage now
-- SQLAlchemy for the models
 - Flask-Admin for the backend interface
 - Bootstrap 5 keeping it looking clean and working properly on phones
 - ReportLab + Pillow to generate those PDF attachments from the contact form
